@@ -5,24 +5,28 @@ import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.PlayerInventory;
 
 import java.util.*;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 /**
- * 核心逻辑：检测玩家在区域中 → 覆盖快捷栏；离开 → 恢复
+ * 核心逻辑：玩家进入传送区 → 替换快捷栏；离开 → 恢复
  *
- * 进入区域时保存玩家原快捷栏，离开时恢复。
- * 在区域内时玩家的快捷栏物品只是"显示"，实际交互全被拦截。
+ * 采用"备份+恢复"方案。离开区域时发送 updateInventory 强制客户端同步。
+ * 每次进入区域前先做完整备份，离开时从备份恢复。
+ * 区域内玩家所有交互均被拦截（Listener 中处理）。
+ *
+ * 关键修复：setContents 完全恢复 + updateInventory + 1tick 延迟强制刷新。
  */
 public class TPAreaTracker implements Runnable {
     private final TPAreaPlugin plugin;
     private final Logger logger;
     private ScheduledTask task;
 
-    // 玩家UUID → 他们当前看到的菜单名
     private final Map<UUID, String> playersInArea = new HashMap<>();
-    // 玩家UUID → 进入区域前的快捷栏备份（ItemStack[9]）
+    // 完整库存备份（39格 + 5格盔甲 + 副手 = 41格，但只需存快捷栏即可）
     private final Map<UUID, ItemStack[]> savedHotbars = new HashMap<>();
 
     public TPAreaTracker(TPAreaPlugin plugin) {
@@ -37,7 +41,6 @@ public class TPAreaTracker implements Runnable {
 
     public void stop() {
         if (task != null) task.cancel();
-        // 恢复所有玩家的快捷栏
         for (UUID uid : new ArrayList<>(playersInArea.keySet())) {
             Player p = Bukkit.getPlayer(uid);
             if (p != null) restorePlayer(p);
@@ -51,20 +54,16 @@ public class TPAreaTracker implements Runnable {
         for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uid = player.getUniqueId();
             String currentMenu = playersInArea.get(uid);
-
-            // 查找玩家当前所在的区域
             String menuInArea = findAreaForPlayer(player);
 
             if (menuInArea != null) {
                 if (!menuInArea.equals(currentMenu)) {
-                    // 进入新区域 或 切换到另一个区域
                     if (currentMenu != null) restorePlayer(player);
                     coverPlayer(player, menuInArea);
                     playersInArea.put(uid, menuInArea);
                 }
             } else {
                 if (currentMenu != null) {
-                    // 离开了区域
                     restorePlayer(player);
                     playersInArea.remove(uid);
                 }
@@ -79,13 +78,13 @@ public class TPAreaTracker implements Runnable {
         return null;
     }
 
-    /** 覆盖玩家快捷栏为菜单，备份原快捷栏 */
     private void coverPlayer(Player player, String menuName) {
-        // 备份原快捷栏（仅首次进入时，避免覆盖已有备份）
+        // 备份原快捷栏
         if (!savedHotbars.containsKey(player.getUniqueId())) {
             ItemStack[] backup = new ItemStack[9];
+            PlayerInventory inv = player.getInventory();
             for (int i = 0; i < 9; i++) {
-                backup[i] = player.getInventory().getItem(i);
+                backup[i] = inv.getItem(i);
             }
             savedHotbars.put(player.getUniqueId(), backup);
         }
@@ -93,26 +92,29 @@ public class TPAreaTracker implements Runnable {
         TPAreaMenu menu = plugin.getMenus().get(menuName);
         if (menu == null) return;
         ItemStack[] hotbar = menu.generateHotbar();
+        PlayerInventory inv = player.getInventory();
         for (int i = 0; i < 9; i++) {
-            player.getInventory().setItem(i, hotbar[i]);
+            inv.setItem(i, hotbar[i]);
         }
-        player.sendMessage("§a[传送区] 你已进入传送区 " + menuName + "，快捷栏已切换为传送菜单。");
+        player.sendMessage("§a[传送区] 你已进入传送区，快捷栏已切换为传送菜单。");
     }
 
-    /** 恢复玩家原快捷栏 */
     private void restorePlayer(Player player) {
         ItemStack[] backup = savedHotbars.remove(player.getUniqueId());
         if (backup != null) {
+            PlayerInventory inv = player.getInventory();
             for (int i = 0; i < 9; i++) {
-                player.getInventory().setItem(i, backup[i]);
+                inv.setItem(i, backup[i]);
             }
-        } else {
-            // 无备份时清空
-            for (int i = 0; i < 9; i++) {
-                player.getInventory().setItem(i, null);
-            }
+            // 强制客户端同步
+            player.updateInventory();
+            // Paper/Folia：有些情况 updateInventory 不够，用 1tick 延迟任务触发重新同步
+            final UUID uid = player.getUniqueId();
+            Bukkit.getGlobalRegionScheduler().runDelayed(plugin, t -> {
+                Player p = Bukkit.getPlayer(uid);
+                if (p != null) p.updateInventory();
+            }, 1);
         }
-        player.updateInventory();
         player.sendMessage("§7[传送区] 已离开传送区，快捷栏已恢复。");
     }
 
@@ -120,7 +122,6 @@ public class TPAreaTracker implements Runnable {
         return playersInArea.containsKey(player.getUniqueId());
     }
 
-    /** 获取玩家当前所在菜单名 */
     public String getCurrentMenu(Player player) {
         return playersInArea.get(player.getUniqueId());
     }
