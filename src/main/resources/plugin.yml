@@ -3,13 +3,7 @@ version: 1.0.0
 main: net.qzgeek.tparea.TPAreaPlugin
 api-version: "1.21"
 folia-supported: true
-description: 传送区域插件 — 进入区域时替换快捷栏为传送菜单
-
-commands:
-  tparea:
-    description: 传送区域管理命令
-    usage: /<command> <子命令>
-    permission: tparea.admin
+description: 传送区域插件 — 进入区域时快捷栏变为传送菜单
 
 permissions:
   tparea.admin:
