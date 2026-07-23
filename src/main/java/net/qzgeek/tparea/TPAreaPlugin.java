@@ -16,6 +16,7 @@ public class TPAreaPlugin extends JavaPlugin {
     private final Map<String, TPArea> areas = new LinkedHashMap<>();
     private final Map<String, TPAreaMenu> menus = new LinkedHashMap<>();
     private TPAreaTracker tracker;
+    private boolean debugMode = false;
 
     @Override
     public void onEnable() {
@@ -52,6 +53,8 @@ public class TPAreaPlugin extends JavaPlugin {
     public Map<String, TPArea> getAreas() { return areas; }
     public Map<String, TPAreaMenu> getMenus() { return menus; }
     public TPAreaTracker getTracker() { return tracker; }
+    public boolean toggleDebug() { debugMode = !debugMode; return debugMode; }
+    public boolean isDebug() { return debugMode; }
 
     // ====== Persistence ======
 

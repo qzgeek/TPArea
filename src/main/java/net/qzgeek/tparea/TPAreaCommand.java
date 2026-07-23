@@ -32,6 +32,7 @@ public class TPAreaCommand implements CommandExecutor, TabCompleter {
             case "set" -> cmdSet(sender, args);
             case "remove" -> cmdRemove(sender, args);
             case "tpmenu" -> cmdTpMenu(sender, args);
+            case "debug" -> cmdDebug(sender);
             default -> sendHelp(sender);
         }
         return true;
@@ -174,6 +175,12 @@ public class TPAreaCommand implements CommandExecutor, TabCompleter {
         sender.sendMessage("§e/tparea tpmenu delete <菜单名>§7 - 删除传送菜单");
         sender.sendMessage("§e/tparea tpmenu set <菜单名> set <序号1-9>§7 - 设传送点(手持物品+当前位置)");
         sender.sendMessage("§e/tparea tpmenu set <菜单名> remove <序号>§7 - 删除传送点");
+        sender.sendMessage("§e/tparea debug§7 - 切换调试消息");
+    }
+
+    private void cmdDebug(CommandSender sender) {
+        boolean now = plugin.toggleDebug();
+        sender.sendMessage(now ? "§a调试消息已开启" : "§7调试消息已关闭");
     }
 
     @Override
