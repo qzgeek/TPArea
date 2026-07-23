@@ -9,7 +9,7 @@ import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 
-import java.util.*;
+import org.bukkit.entity.Player;
 
 /**
  * 快捷栏"传送菜单"：包含1~9个传送点

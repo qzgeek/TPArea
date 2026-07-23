@@ -1,10 +1,10 @@
 plugins {
-    id('java')
-    id('com.gradleup.shadow') version '9.0.0-beta10'
+    id("java")
+    id("com.gradleup.shadow") version "9.0.0-beta10" apply true
 }
 
-group = 'net.qzgeek'
-version = '1.0.0'
+group = "net.qzgeek"
+version = "1.0.0"
 
 java {
     toolchain {
@@ -14,20 +14,19 @@ java {
 
 repositories {
     mavenCentral()
-    maven('https://repo.papermc.io/repository/maven-public/')
+    maven("https://repo.papermc.io/repository/maven-public/")
 }
 
 dependencies {
-    compileOnly('io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT')
-}
-
-shadowJar {
-    archiveBaseName.set('TPArea')
-    archiveClassifier.set('')
+    compileOnly("io.papermc.paper:paper-api:1.21.4-R0.1-SNAPSHOT")
 }
 
 tasks {
+    named<com.github.jengelman.gradle.plugins.shadow.tasks.ShadowJar>("shadowJar") {
+        archiveBaseName.set("TPArea")
+        archiveClassifier.set("")
+    }
     build {
-        dependsOn(shadowJar)
+        dependsOn("shadowJar")
     }
 }

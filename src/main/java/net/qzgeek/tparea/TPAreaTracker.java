@@ -1,5 +1,7 @@
 package net.qzgeek.tparea;
 
+import io.papermc.paper.threadedregions.scheduler.ScheduledTask;  // Folia compat
+
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
@@ -17,7 +19,7 @@ import java.util.logging.Logger;
 public class TPAreaTracker implements Runnable {
     private final TPAreaPlugin plugin;
     private final Logger logger;
-    private BukkitTask task;
+    private ScheduledTask task;
 
     // 当前在区域内的玩家 → 他们看到的菜单名
     private final Map<UUID, String> playersInArea = new HashMap<>();
