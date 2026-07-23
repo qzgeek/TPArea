@@ -1,34 +1,33 @@
 package net.qzgeek.tparea;
 
-import com.comphenix.protocol.PacketType;
-import com.comphenix.protocol.ProtocolLibrary;
-import com.comphenix.protocol.ProtocolManager;
-import com.comphenix.protocol.events.PacketAdapter;
-import com.comphenix.protocol.events.PacketContainer;
-import com.comphenix.protocol.events.PacketEvent;
-import com.comphenix.protocol.events.ListenerOptions;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
-import org.bukkit.plugin.Plugin;
+import org.bukkit.inventory.PlayerInventory;
 
 import java.util.*;
-import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
-public class TPAreaTracker {
+/**
+ * 纯 Bukkit API 方案 — 进入时保存+替换快捷栏，离开时恢复。
+ *
+ * 恢复保证：
+ * 1. 立即恢复 setItem
+ * 2. updateInventory() 强制同步
+ * 3. 2 个延迟任务：1tick 和 5tick 后再次 updateInventory
+ * 4. 离开区域后关闭玩家可能卡住的任何容器
+ * 5. 玩家若死亡会触发恢复
+ */
+public class TPAreaTracker implements Runnable {
     private final TPAreaPlugin plugin;
     private final Logger logger;
     private ScheduledTask task;
 
-    private static final Map<UUID, String> activeMenus = new HashMap<>();
-    private final Map<UUID, String> currentState = new HashMap<>();
-
-    // ProtocolLib listeners reference for unregister
-    private PacketAdapter slotListener;
+    private final Map<UUID, String> playersInArea = new HashMap<>();
+    private final Map<UUID, ItemStack[]> savedHotbars = new HashMap<>();
 
     public TPAreaTracker(TPAreaPlugin plugin) {
         this.plugin = plugin;
@@ -36,57 +35,38 @@ public class TPAreaTracker {
     }
 
     public void start() {
-        ProtocolManager pm = ProtocolLibrary.getProtocolManager();
-
-        // 只拦截 SET_SLOT — 阻止快捷栏真实数据下发给客户端
-        slotListener = new PacketAdapter(plugin, com.comphenix.protocol.events.ListenerPriority.NORMAL, PacketType.Play.Server.SET_SLOT) {
-            @Override
-            public void onPacketSending(PacketEvent event) {
-                Player player = event.getPlayer();
-                if (!activeMenus.containsKey(player.getUniqueId())) return;
-
-                PacketContainer packet = event.getPacket();
-                try {
-                    // SET_SLOT packet: getIntegers().read(0)=containerId, read(1)=slot
-                    int slot = packet.getIntegers().read(1);
-                    if (slot >= 36 && slot <= 44) {
-                        event.setCancelled(true);
-                    }
-                } catch (Exception ignored) {}
-            }
-        };
-        pm.addPacketListener(slotListener);
-
-        // 区域检测循环: 每 5 tick = 250ms
         task = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, t -> run(), 20, 5);
-        logger.info("区域检测已启动 (每0.25秒)");
+        logger.info("区域检测已启动");
     }
 
     public void stop() {
         if (task != null) task.cancel();
-        if (slotListener != null) {
-            ProtocolLibrary.getProtocolManager().removePacketListener(slotListener);
+        for (UUID uid : new ArrayList<>(playersInArea.keySet())) {
+            Player p = Bukkit.getPlayer(uid);
+            if (p != null) forceRestore(p);
         }
-        activeMenus.clear();
-        currentState.clear();
+        playersInArea.clear();
+        savedHotbars.clear();
     }
 
-    private void run() {
+    @Override
+    public void run() {
         for (Player player : Bukkit.getOnlinePlayers()) {
             UUID uid = player.getUniqueId();
-            String prev = currentState.get(uid);
-            String now = findAreaForPlayer(player);
+            String currentMenu = playersInArea.get(uid);
+            String menuInArea = findAreaForPlayer(player);
 
-            if (now != null && !now.equals(prev)) {
-                activeMenus.put(uid, now);
-                currentState.put(uid, now);
-                sendMenuPackets(player, now);
-                if (plugin.isDebug()) player.sendMessage("§a[传送区] 进入传送区");
-            } else if (now == null && prev != null) {
-                activeMenus.remove(uid);
-                currentState.remove(uid);
-                forceResync(player);
-                if (plugin.isDebug()) player.sendMessage("§7[传送区] 离开传送区");
+            if (menuInArea != null) {
+                if (!menuInArea.equals(currentMenu)) {
+                    if (currentMenu != null) forceRestore(player);
+                    enterArea(player, menuInArea);
+                    playersInArea.put(uid, menuInArea);
+                }
+            } else {
+                if (currentMenu != null) {
+                    forceRestore(player);
+                    playersInArea.remove(uid);
+                }
             }
         }
     }
@@ -98,39 +78,57 @@ public class TPAreaTracker {
         return null;
     }
 
-    /** 发送 9 个虚假 SET_SLOT 包覆盖客户端快捷栏 */
-    private void sendMenuPackets(Player player, String menuName) {
+    private void enterArea(Player player, String menuName) {
+        ItemStack[] backup = new ItemStack[9];
+        PlayerInventory inv = player.getInventory();
+        for (int i = 0; i < 9; i++) backup[i] = inv.getItem(i);
+        savedHotbars.put(player.getUniqueId(), backup);
+
         TPAreaMenu menu = plugin.getMenus().get(menuName);
         if (menu == null) return;
         ItemStack[] hotbar = menu.generateHotbar();
-        ProtocolManager pm = ProtocolLibrary.getProtocolManager();
-
         for (int i = 0; i < 9; i++) {
-            PacketContainer packet = pm.createPacket(PacketType.Play.Server.SET_SLOT);
-            packet.getIntegers().write(0, 0);
-            packet.getIntegers().write(1, 36 + i);
-            ItemStack item = (i < hotbar.length && hotbar[i] != null && hotbar[i].getType() != Material.AIR)
-                ? hotbar[i] : new ItemStack(Material.AIR);
-            packet.getItemModifier().write(0, item);
-            pm.sendServerPacket(player, packet, false);
+            inv.setItem(i, hotbar[i]);
         }
+        if (plugin.isDebug()) player.sendMessage("§a[传送区] 进入传送区");
     }
 
-    /** 强制恢复 */
-    private void forceResync(Player player) {
+    private void forceRestore(Player player) {
+        ItemStack[] backup = savedHotbars.remove(player.getUniqueId());
+        if (backup != null) {
+            PlayerInventory inv = player.getInventory();
+            for (int i = 0; i < 9; i++) {
+                inv.setItem(i, backup[i]);
+            }
+        }
+        // 关闭任何打开的容器
+        if (player.getOpenInventory() != null
+            && player.getOpenInventory().getType() != org.bukkit.event.inventory.InventoryType.CRAFTING) {
+            player.closeInventory();
+        }
         player.updateInventory();
-        final UUID uid = player.getUniqueId();
+
+        // 延迟重试 (1tick, 5tick, 20tick)
+        UUID uid = player.getUniqueId();
+        scheduleUpdate(uid, 1);
+        scheduleUpdate(uid, 5);
+        scheduleUpdate(uid, 20);
+
+        if (plugin.isDebug()) player.sendMessage("§7[传送区] 离开传送区，快捷栏已恢复。");
+    }
+
+    private void scheduleUpdate(UUID uid, long delay) {
         Bukkit.getGlobalRegionScheduler().runDelayed(plugin, t -> {
             Player p = Bukkit.getPlayer(uid);
             if (p != null) p.updateInventory();
-        }, 1);
+        }, delay);
     }
 
     public boolean isInAnyArea(Player player) {
-        return activeMenus.containsKey(player.getUniqueId());
+        return playersInArea.containsKey(player.getUniqueId());
     }
 
     public String getCurrentMenu(Player player) {
-        return activeMenus.get(player.getUniqueId());
+        return playersInArea.get(player.getUniqueId());
     }
 }
