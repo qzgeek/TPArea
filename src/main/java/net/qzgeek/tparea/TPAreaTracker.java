@@ -61,14 +61,34 @@ public class TPAreaTracker {
                 ItemStack[] hotbar = menu.generateHotbar();
 
                 PacketContainer packet = event.getPacket();
-                List<ItemStack> items = packet.getItemListModifier().read(0);
+                // 防御性读取：用 try-catch 避免跨维度等特殊包类型导致异常
+                List<ItemStack> items;
+                try {
+                    items = packet.getItemListModifier().read(0);
+                } catch (Exception e) {
+                    return; // 非标准库存包，跳过
+                }
 
-                if (items != null && items.size() >= 36) {
-                    // 快捷栏在完整库存中的偏移是 36（9×4 背包 + 9 快捷栏）
-                    // Paper 1.21+ 的 ProtocolLib 中快捷栏起始索引
+                if (items != null && items.size() >= 46) {
+                    // 标准玩家库存 46 格。如有必要，复制并替换
+                    // ProtocolLib 在一些场景返回不可修改列表，不能直接 set()
+                    ItemStack[] nmsItems = new ItemStack[9];
                     for (int i = 0; i < 9 && i < hotbar.length; i++) {
-                        int slotIndex = items.size() - 9 + i; // 通常是最后9格
-                        items.set(slotIndex, hotbar[i] != null ? hotbar[i] : new ItemStack(org.bukkit.Material.AIR));
+                        nmsItems[i] = hotbar[i] != null ? hotbar[i] : new ItemStack(org.bukkit.Material.AIR);
+                    }
+                    event.setPacket(packet.deepClone());
+                    PacketContainer cloned = event.getPacket();
+                    List<ItemStack> clonedItems;
+                    try {
+                        clonedItems = cloned.getItemListModifier().read(0);
+                    } catch (Exception e) {
+                        return;
+                    }
+                    if (clonedItems != null) {
+                        for (int i = 0; i < 9 && i < hotbar.length; i++) {
+                            int slotIndex = clonedItems.size() - 9 + i;
+                            clonedItems.set(slotIndex, nmsItems[i]);
+                        }
                     }
                 }
             }
