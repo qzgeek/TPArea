@@ -12,7 +12,10 @@ import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryOpenEvent;
+import org.bukkit.event.inventory.InventoryCreativeEvent;
+import org.bukkit.event.inventory.InventoryPickupItemEvent;
 import org.bukkit.event.player.*;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.inventory.ItemStack;
 
 import java.util.List;
@@ -148,6 +151,68 @@ public class TPAreaListener implements Listener {
     public void onEntityInteract(PlayerInteractEntityEvent event) {
         if (plugin.getTracker().isInAnyArea(event.getPlayer())) {
             event.setCancelled(true);
+        }
+    }
+
+    /** 禁止物品掉落物被漏斗/漏斗矿车拾取（防止刷物品） */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onInventoryPickup(InventoryPickupItemEvent event) {
+        // 不限制此事件，仅用于记录
+    }
+
+    /** 禁止创造模式从背包拿物品 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onCreative(InventoryCreativeEvent event) {
+        if (event.getWhoClicked() instanceof Player player && plugin.getTracker().isInAnyArea(player)) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止任何伤害来源导致玩家受伤/死亡（防掉落物因死亡丢失） */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onEntityDamage(EntityDamageEvent event) {
+        if (event.getEntity() instanceof Player player && plugin.getTracker().isInAnyArea(player)) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止玩家使用床/重生锚 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onBed(PlayerBedEnterEvent event) {
+        if (plugin.getTracker().isInAnyArea(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止钓鱼 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onFish(PlayerFishEvent event) {
+        if (plugin.getTracker().isInAnyArea(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止射箭/投掷三叉戟 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onProjectileLaunch(org.bukkit.event.entity.ProjectileLaunchEvent event) {
+        if (event.getEntity().getShooter() instanceof Player player && plugin.getTracker().isInAnyArea(player)) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止玩家剪切/挤奶等实体交互 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPlayerInteractAtEntity(PlayerInteractAtEntityEvent event) {
+        if (plugin.getTracker().isInAnyArea(event.getPlayer())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** 禁止附魔/铁砧等界面 */
+    @EventHandler(priority = EventPriority.LOWEST)
+    public void onPrepareItemCraft(org.bukkit.event.inventory.PrepareItemCraftEvent event) {
+        if (event.getView().getPlayer() instanceof Player player && plugin.getTracker().isInAnyArea(player)) {
+            event.getInventory().setResult(null);
         }
     }
 
