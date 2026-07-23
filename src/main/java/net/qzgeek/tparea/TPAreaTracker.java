@@ -1,90 +1,79 @@
 package net.qzgeek.tparea;
 
-import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
-
 import org.bukkit.Bukkit;
-import org.bukkit.Material;
 import org.bukkit.entity.Player;
-import org.bukkit.inventory.ItemStack;
-import org.bukkit.inventory.PlayerInventory;
 
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Logger;
 
 /**
- * 纯 Bukkit API 方案 — 进入时保存+替换快捷栏，离开时恢复。
+ * A：区域检测，不与 tick 挂钩，用独立线程每 500ms 检测。
+ * 检测到玩家进入 → 加入缓存
+ * 检测到玩家离开 → 从缓存移除 → 通知 B 恢复
  *
- * 恢复保证：
- * 1. 立即恢复 setItem
- * 2. updateInventory() 强制同步
- * 3. 延迟任务反复 updateInventory
- * 4. 离开后关闭卡住的容器
- *
- * 关键修复：playersInArea 是唯一的权威状态源。
- * isInAnyArea / getCurrentMenu 完全基于 playersInArea。
- * 离开时，必须等连续 3 次检测都不在区域内才真正清理（防闪烁）。
+ * 缓存是一个 ConcurrentHashMap，由 A 写入，由 B（TPAreaPacketEngine）读取。
+ * A 完全不碰玩家库存。
  */
-public class TPAreaTracker implements Runnable {
+public class TPAreaTracker {
+
     private final TPAreaPlugin plugin;
     private final Logger logger;
-    private ScheduledTask task;
-
-    private final Map<UUID, String> playersInArea = new HashMap<>();
-    private final Map<UUID, ItemStack[]> savedHotbars = new HashMap<>();
-    // 离开缓冲计数：连续多少轮不在区域内才真正触发离开
-    private final Map<UUID, Integer> leaveCounters = new HashMap<>();
-    private static final int LEAVE_CONFIRM = 3; // 连续 3 次确认才离开
+    private final Map<UUID, String> cache = new ConcurrentHashMap<>();
+    private final TPAreaPacketEngine engine;
+    private java.util.concurrent.ScheduledExecutorService executor;
+    private java.util.concurrent.ScheduledFuture<?> future;
 
     public TPAreaTracker(TPAreaPlugin plugin) {
         this.plugin = plugin;
         this.logger = plugin.getLogger();
+        this.engine = new TPAreaPacketEngine(plugin, cache);
     }
 
     public void start() {
-        task = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, t -> run(), 20, 5);
-        logger.info("区域检测已启动");
+        engine.start();
+        executor = java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread t = new Thread(r, "TPArea-Detector");
+            t.setDaemon(true);
+            return t;
+        });
+        future = executor.scheduleAtFixedRate(this::detect, 0, 500, TimeUnit.MILLISECONDS);
+        logger.info("[A] 区域检测已启动 (每500ms, 独立线程)");
     }
 
     public void stop() {
-        if (task != null) task.cancel();
-        for (UUID uid : new ArrayList<>(playersInArea.keySet())) {
+        if (future != null) future.cancel(false);
+        if (executor != null) executor.shutdown();
+        engine.stop();
+        // 通知所有缓存玩家恢复
+        for (UUID uid : new ArrayList<>(cache.keySet())) {
             Player p = Bukkit.getPlayer(uid);
-            if (p != null) forceRestore(p);
+            if (p != null) engine.notifyLeave(p);
         }
-        playersInArea.clear();
-        savedHotbars.clear();
-        leaveCounters.clear();
+        cache.clear();
     }
 
-    @Override
-    public void run() {
+    private void detect() {
+        // 当前在线玩家有哪些在区域内
+        Set<UUID> found = new HashSet<>();
         for (Player player : Bukkit.getOnlinePlayers()) {
-            UUID uid = player.getUniqueId();
-            String prev = playersInArea.get(uid);
-            String now = findAreaForPlayer(player);
-
-            if (now != null) {
-                // 在区域内
-                leaveCounters.remove(uid); // 重置离开计数
-                if (!now.equals(prev)) {
-                    // 进入新区域
-                    if (prev != null) forceRestore(player);
-                    enterArea(player, now);
-                    playersInArea.put(uid, now);
+            String menu = findAreaForPlayer(player);
+            if (menu != null) {
+                found.add(player.getUniqueId());
+                // 不在缓存中 → 新进入
+                if (!cache.containsKey(player.getUniqueId())) {
+                    cache.put(player.getUniqueId(), menu);
                 }
-                // 已在区域内：不操作
-            } else {
-                // 不在区域
-                if (prev != null) {
-                    // 使用缓冲计数确认离开
-                    int cnt = leaveCounters.getOrDefault(uid, 0) + 1;
-                    leaveCounters.put(uid, cnt);
-                    if (cnt >= LEAVE_CONFIRM) {
-                        // 真正离开
-                        forceRestore(player);
-                        playersInArea.remove(uid);
-                        leaveCounters.remove(uid);
-                    }
+            }
+        }
+        // 缓存中有但检测不在 → 离开
+        for (UUID uid : new ArrayList<>(cache.keySet())) {
+            if (!found.contains(uid)) {
+                cache.remove(uid);
+                Player player = Bukkit.getPlayer(uid);
+                if (player != null) {
+                    engine.notifyLeave(player);
                 }
             }
         }
@@ -97,49 +86,11 @@ public class TPAreaTracker implements Runnable {
         return null;
     }
 
-    private void enterArea(Player player, String menuName) {
-        ItemStack[] backup = new ItemStack[9];
-        PlayerInventory inv = player.getInventory();
-        for (int i = 0; i < 9; i++) backup[i] = inv.getItem(i);
-        savedHotbars.put(player.getUniqueId(), backup);
-
-        TPAreaMenu menu = plugin.getMenus().get(menuName);
-        if (menu == null) return;
-        ItemStack[] hotbar = menu.generateHotbar();
-        for (int i = 0; i < 9; i++) {
-            inv.setItem(i, hotbar[i]);
-        }
-        if (plugin.isDebug()) player.sendMessage("§a[传送区] 进入传送区");
-    }
-
-    /** 离开时恢复快捷栏并发送刷新包 */
-    private void forceRestore(Player player) {
-        ItemStack[] backup = savedHotbars.remove(player.getUniqueId());
-        if (backup != null) {
-            PlayerInventory inv = player.getInventory();
-            for (int i = 0; i < 9; i++) {
-                inv.setItem(i, backup[i]);
-            }
-        }
-        player.updateInventory();
-
-        UUID uid = player.getUniqueId();
-        // 多轮延迟刷新确保客户端拿到真实数据
-        for (long delay : new long[]{1, 5, 10, 20}) {
-            Bukkit.getGlobalRegionScheduler().runDelayed(plugin, t -> {
-                Player p = Bukkit.getPlayer(uid);
-                if (p != null) p.updateInventory();
-            }, delay);
-        }
-
-        if (plugin.isDebug()) player.sendMessage("§7[传送区] 离开传送区");
-    }
-
     public boolean isInAnyArea(Player player) {
-        return playersInArea.containsKey(player.getUniqueId());
+        return cache.containsKey(player.getUniqueId());
     }
 
     public String getCurrentMenu(Player player) {
-        return playersInArea.get(player.getUniqueId());
+        return cache.get(player.getUniqueId());
     }
 }
