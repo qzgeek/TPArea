@@ -9,6 +9,7 @@ import com.comphenix.protocol.events.PacketEvent;
 import io.papermc.paper.threadedregions.scheduler.ScheduledTask;
 
 import org.bukkit.Bukkit;
+import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
@@ -17,26 +18,19 @@ import java.util.*;
 import java.util.logging.Logger;
 
 /**
- * 核心逻辑（ProtocolLib 包拦截版本）：
+ * ProtocolLib 包拦截方案（仅 SET_SLOT）。
  *
- * 进入区域 → 通过 ProtocolLib 拦截 WINDOW_ITEMS 和 SET_SLOT 包，
- *   把发给玩家的库存同步包中的快捷栏部分替换为菜单物品。
- *   玩家的真实库存数据完全不受影响。
- *
- * 离开区域 → 停止包拦截，客户端自动从服务端同步真实库存。
- *   另外主动发送一个 WINDOW_ITEMS 包强制刷新。
- *
- * 区域内玩家的交互全部被拦截（Listener 中处理），防止背包操作等。
+ * 安全原则：不动 WINDOW_ITEMS（跨维度/登录等场景包结构不可预测），
+ * 只拦截 SET_SLOT 阻止快捷栏槽位的真实数据下发给客户端。
+ * 进入区域后主动发送 9 个虚假 SET_SLOT 包覆盖快捷栏。
+ * 离开区域后停止拦截，客户端下次收到真实 SET_SLOT 即恢复。
  */
 public class TPAreaTracker {
     private final TPAreaPlugin plugin;
     private final Logger logger;
     private ScheduledTask task;
 
-    // 菜单名缓存在 activeMenus 中供 PacketAdapter 读取
     private static final Map<UUID, String> activeMenus = new HashMap<>();
-
-    // 区域检测（每0.5秒）决定玩家进入/离开
     private final Map<UUID, String> currentState = new HashMap<>();
 
     public TPAreaTracker(TPAreaPlugin plugin) {
@@ -45,80 +39,27 @@ public class TPAreaTracker {
     }
 
     public void start() {
-        // 注册 ProtocolLib 监听
         ProtocolManager pm = ProtocolLibrary.getProtocolManager();
 
-        // 拦截 WINDOW_ITEMS（完整库存同步包）— 替换快捷栏 0-8
-        pm.addPacketListener(new PacketAdapter(plugin, PacketType.Play.Server.WINDOW_ITEMS) {
-            @Override
-            public void onPacketSending(PacketEvent event) {
-                Player player = event.getPlayer();
-                String menuName = activeMenus.get(player.getUniqueId());
-                if (menuName == null) return;
-
-                TPAreaMenu menu = ((TPAreaPlugin) plugin).getMenus().get(menuName);
-                if (menu == null) return;
-                ItemStack[] hotbar = menu.generateHotbar();
-
-                PacketContainer packet = event.getPacket();
-                // 防御性读取：用 try-catch 避免跨维度等特殊包类型导致异常
-                List<ItemStack> items;
-                try {
-                    items = packet.getItemListModifier().read(0);
-                } catch (Exception e) {
-                    return; // 非标准库存包，跳过
-                }
-
-                if (items != null && items.size() >= 46) {
-                    // 标准玩家库存 46 格。如有必要，复制并替换
-                    // ProtocolLib 在一些场景返回不可修改列表，不能直接 set()
-                    ItemStack[] nmsItems = new ItemStack[9];
-                    for (int i = 0; i < 9 && i < hotbar.length; i++) {
-                        nmsItems[i] = hotbar[i] != null ? hotbar[i] : new ItemStack(org.bukkit.Material.AIR);
-                    }
-                    event.setPacket(packet.deepClone());
-                    PacketContainer cloned = event.getPacket();
-                    List<ItemStack> clonedItems;
-                    try {
-                        clonedItems = cloned.getItemListModifier().read(0);
-                    } catch (Exception e) {
-                        return;
-                    }
-                    if (clonedItems != null) {
-                        for (int i = 0; i < 9 && i < hotbar.length; i++) {
-                            int slotIndex = clonedItems.size() - 9 + i;
-                            clonedItems.set(slotIndex, nmsItems[i]);
-                        }
-                    }
-                }
-            }
-        });
-
-        // 拦截 SET_SLOT（单格更新包）— 如果更新的是快捷栏，替换为菜单物品
+        // 只拦截 SET_SLOT — 阻止快捷栏真实数据下发给客户端
         pm.addPacketListener(new PacketAdapter(plugin, PacketType.Play.Server.SET_SLOT) {
             @Override
             public void onPacketSending(PacketEvent event) {
                 Player player = event.getPlayer();
-                String menuName = activeMenus.get(player.getUniqueId());
-                if (menuName == null) return;
+                if (!activeMenus.containsKey(player.getUniqueId())) return;
 
                 PacketContainer packet = event.getPacket();
-                int slot = packet.getIntegers().read(1); // 第2个int是槽位编号
-
-                // 快捷栏槽位：玩家库存中 36-44
-                if (slot >= 36 && slot <= 44) {
-                    TPAreaMenu menu = ((TPAreaPlugin) plugin).getMenus().get(menuName);
-                    if (menu == null) return;
-                    ItemStack[] hotbar = menu.generateHotbar();
-                    int idx = slot - 36;
-                    if (idx >= 0 && idx < hotbar.length && hotbar[idx] != null) {
-                        packet.getItemModifier().write(0, hotbar[idx]);
+                try {
+                    int slot = packet.getIntegers().read(1);
+                    // 玩家库存快捷栏槽位: 36-44
+                    if (slot >= 36 && slot <= 44) {
+                        event.setCancelled(true);
                     }
-                }
+                } catch (Exception ignored) {}
             }
         });
 
-        // 启动区域检测循环
+        // 区域检测循环
         task = Bukkit.getGlobalRegionScheduler().runAtFixedRate(plugin, t -> run(), 20, 10);
         logger.info("区域检测已启动 (每0.5秒)");
     }
@@ -136,16 +77,13 @@ public class TPAreaTracker {
             String now = findAreaForPlayer(player);
 
             if (now != null && !now.equals(prev)) {
-                // 进入
                 activeMenus.put(uid, now);
                 currentState.put(uid, now);
-                forceSync(player, now);
+                sendMenuPackets(player, now);
                 if (plugin.isDebug()) player.sendMessage("§a[传送区] 进入传送区");
             } else if (now == null && prev != null) {
-                // 离开
                 activeMenus.remove(uid);
                 currentState.remove(uid);
-                // 发送原始库存包强制同步恢复
                 forceResync(player);
                 if (plugin.isDebug()) player.sendMessage("§7[传送区] 离开传送区");
             }
@@ -159,31 +97,27 @@ public class TPAreaTracker {
         return null;
     }
 
-    /** 强制发送一个替换后的库存包让客户端立即显示菜单 */
-    private void forceSync(Player player, String menuName) {
+    /** 发送 9 个虚假 SET_SLOT 包覆盖客户端快捷栏 */
+    private void sendMenuPackets(Player player, String menuName) {
         TPAreaMenu menu = plugin.getMenus().get(menuName);
         if (menu == null) return;
         ItemStack[] hotbar = menu.generateHotbar();
-
-        // 用 ProtocolLib 构造一个虚拟库存包
         ProtocolManager pm = ProtocolLibrary.getProtocolManager();
-        PacketContainer packet = pm.createPacket(PacketType.Play.Server.WINDOW_ITEMS);
-        packet.getIntegers().write(0, 0); // containerId = 0 (玩家库存)
-        packet.getIntegers().write(1, 0); // stateId
 
-        // 读玩家当前库存，修改快捷栏后发送
-        List<ItemStack> items = new ArrayList<>();
-        var inv = player.getInventory();
-        for (int i = 0; i < 36; i++) items.add(inv.getItem(i));
-        // 注掉原始数据补全（ProtocolLib 的 WINDOW_ITEMS 需要完整列表）
-        // 改用 getItemListModifier 直接操作
-        pm.sendServerPacket(player, packet);
+        for (int i = 0; i < 9; i++) {
+            PacketContainer packet = pm.createPacket(PacketType.Play.Server.SET_SLOT);
+            packet.getIntegers().write(0, 0); // containerId = 0 (玩家库存)
+            packet.getIntegers().write(1, 36 + i); // 槽位
+            ItemStack item = (i < hotbar.length && hotbar[i] != null && hotbar[i].getType() != Material.AIR)
+                ? hotbar[i] : new ItemStack(Material.AIR);
+            packet.getItemModifier().write(0, item);
+            pm.sendServerPacket(player, packet);
+        }
     }
 
-    /** 强制同步真实库存（恢复客户端显示） */
+    /** 强制恢复 — 只需发 updateInventory 触发服务端重新同步 */
     private void forceResync(Player player) {
         player.updateInventory();
-        // 1tick 后二次刷新
         final UUID uid = player.getUniqueId();
         Bukkit.getGlobalRegionScheduler().runDelayed(plugin, t -> {
             Player p = Bukkit.getPlayer(uid);
