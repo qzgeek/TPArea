@@ -1,10 +1,14 @@
 package net.qzgeek.tparea;
 
+import org.bukkit.command.PluginCommand;
+import org.bukkit.command.CommandMap;
+import org.bukkit.command.CommandSender;
+import org.bukkit.command.defaults.BukkitCommand;
 import org.bukkit.configuration.ConfigurationSection;
-import org.bukkit.configuration.file.FileConfiguration;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 public class TPAreaPlugin extends JavaPlugin {
@@ -22,10 +26,10 @@ public class TPAreaPlugin extends JavaPlugin {
         loadAreas();
         loadMenus();
 
-        // Register commands
+        // Register command using CommandMap (Paper 1.21+ compatible)
         TPAreaCommand cmd = new TPAreaCommand(this);
-        getCommand("tparea").setExecutor(cmd);
-        getCommand("tparea").setTabCompleter(cmd);
+        CommandMap commandMap = getServer().getCommandMap();
+        commandMap.register("tparea", new TpAreaBukkitCommand(cmd));
 
         // Register listeners
         getServer().getPluginManager().registerEvents(new TPAreaListener(this), this);
@@ -52,30 +56,30 @@ public class TPAreaPlugin extends JavaPlugin {
     // ====== Persistence ======
 
     public void saveAreas() {
-        FileConfiguration config = getConfig();
+        var config = getConfig();
         config.set("areas", null);
         for (Map.Entry<String, TPArea> entry : areas.entrySet()) {
-            ConfigurationSection sec = config.createSection("areas." + entry.getKey());
+            var sec = config.createSection("areas." + entry.getKey());
             entry.getValue().saveTo(sec);
         }
         saveConfig();
     }
 
     public void saveMenus() {
-        FileConfiguration config = getConfig();
+        var config = getConfig();
         config.set("menus", null);
         for (Map.Entry<String, TPAreaMenu> entry : menus.entrySet()) {
-            ConfigurationSection sec = config.createSection("menus." + entry.getKey());
+            var sec = config.createSection("menus." + entry.getKey());
             entry.getValue().saveTo(sec);
         }
         saveConfig();
     }
 
     private void loadAreas() {
-        ConfigurationSection sec = getConfig().getConfigurationSection("areas");
+        var sec = getConfig().getConfigurationSection("areas");
         if (sec == null) return;
         for (String key : sec.getKeys(false)) {
-            ConfigurationSection areaSec = sec.getConfigurationSection(key);
+            var areaSec = sec.getConfigurationSection(key);
             if (areaSec != null) {
                 areas.put(key, TPArea.loadFrom(key, areaSec));
             }
@@ -83,13 +87,34 @@ public class TPAreaPlugin extends JavaPlugin {
     }
 
     private void loadMenus() {
-        ConfigurationSection sec = getConfig().getConfigurationSection("menus");
+        var sec = getConfig().getConfigurationSection("menus");
         if (sec == null) return;
         for (String key : sec.getKeys(false)) {
-            ConfigurationSection menuSec = sec.getConfigurationSection(key);
+            var menuSec = sec.getConfigurationSection(key);
             if (menuSec != null) {
                 menus.put(key, TPAreaMenu.loadFrom(key, menuSec));
             }
+        }
+    }
+
+    /** Our own BukkitCommand — avoids getCommand() which is deprecated on Paper 1.21+ */
+    private static class TpAreaBukkitCommand extends BukkitCommand {
+        private final TPAreaCommand delegate;
+
+        TpAreaBukkitCommand(TPAreaCommand delegate) {
+            super("tparea", "传送区域管理命令", "/tparea <子命令>", List.of("tpa"));
+            this.delegate = delegate;
+            setPermission("tparea.admin");
+        }
+
+        @Override
+        public boolean execute(CommandSender sender, String label, String[] args) {
+            return delegate.onCommand(sender, this, label, args);
+        }
+
+        @Override
+        public List<String> tabComplete(CommandSender sender, String alias, String[] args) {
+            return delegate.onTabComplete(sender, this, alias, args);
         }
     }
 }
